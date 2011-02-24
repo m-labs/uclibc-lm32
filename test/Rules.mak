@@ -39,6 +39,7 @@ TARGET_ARCH:=$(shell $(CC) -dumpmachine | sed -e s'/-.*//' \
 	-e 's/mips.*/mips/' \
 	-e 's/cris.*/cris/' \
 	-e 's/xtensa.*/xtensa/' \
+	-e 's/lm32.*/lm32/' \
 	)
 endif
 export TARGET_ARCH
