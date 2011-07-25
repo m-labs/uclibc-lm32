@@ -51,7 +51,8 @@ unsigned long _dl_linux_resolver(unsigned long got_offset, unsigned long *got)
 	symname = strtab + sym->st_name;
 
 	new_addr = (unsigned long) _dl_find_hash(symname,
-						 tpnt->symbol_scope, tpnt, ELF_RTYPE_CLASS_PLT, NULL);
+						 &_dl_loaded_modules->symbol_scope, tpnt,
+						 ELF_RTYPE_CLASS_PLT, NULL);
 
 	entry = (unsigned long *)(got + local_gotno + sym_index - gotsym);
 	*entry = new_addr;
@@ -62,9 +63,9 @@ unsigned long _dl_linux_resolver(unsigned long got_offset, unsigned long *got)
 }
 
 static int
-_dl_parse(struct elf_resolve *tpnt, struct dyn_elf *scope,
+_dl_parse(struct elf_resolve *tpnt, struct r_scope_elem *scope,
 	  unsigned long rel_addr, unsigned long rel_size,
-	  int (*reloc_func)(struct elf_resolve *tpnt, struct dyn_elf *scope,
+	  int (*reloc_func)(struct elf_resolve *tpnt, struct r_scope_elem *scope,
 			    Elf32_Rela *rpnt, Elf32_Sym *symtab, char *strtab))
 {
 	Elf32_Sym *symtab;
@@ -115,7 +116,7 @@ _dl_parse(struct elf_resolve *tpnt, struct dyn_elf *scope,
 	return 0;
 }
 
-static int _dl_do_reloc(struct elf_resolve *tpnt, struct dyn_elf *scope,
+static int _dl_do_reloc(struct elf_resolve *tpnt, struct r_scope_elem *scope,
 			Elf32_Rela *rpnt, Elf32_Sym *symtab, char *strtab)
 {
 	int reloc_type;
@@ -148,6 +149,9 @@ static int _dl_do_reloc(struct elf_resolve *tpnt, struct dyn_elf *scope,
 				    _dl_progname, symname);
 			return 0;
 		}
+		if (_dl_trace_prelink)
+			_dl_debug_lookup (symname, tpnt, &symtab[symtab_index],
+				&sym_ref, elf_machine_type_class(reloc_type));
 	}
 
 #if defined(__SUPPORT_LD_DEBUG__)
@@ -186,9 +190,10 @@ void _dl_parse_lazy_relocation_information(struct dyn_elf *rpnt,
 }
 
 int _dl_parse_relocation_information(struct dyn_elf *rpnt,
+				     struct r_scope_elem *scope,
 				     unsigned long rel_addr,
 				     unsigned long rel_size)
 {
-	return _dl_parse(rpnt->dyn, rpnt->dyn->symbol_scope, rel_addr, rel_size,
+	return _dl_parse(rpnt->dyn, scope, rel_addr, rel_size,
 			 _dl_do_reloc);
 }

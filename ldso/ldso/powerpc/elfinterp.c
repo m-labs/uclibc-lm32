@@ -139,7 +139,7 @@ unsigned long _dl_linux_resolver(struct elf_resolve *tpnt, int reloc_entry)
 
 	/* Get the address of the GOT entry */
 	finaladdr = (Elf32_Addr) _dl_find_hash(symname,
-			tpnt->symbol_scope, tpnt, ELF_RTYPE_CLASS_PLT, NULL);
+			&_dl_loaded_modules->symbol_scope, tpnt, ELF_RTYPE_CLASS_PLT, NULL);
 	if (unlikely(!finaladdr)) {
 		_dl_dprintf(2, "%s: can't resolve symbol '%s' in lib '%s'.\n", _dl_progname, symname, tpnt->libname);
 		_dl_exit(1);
@@ -182,7 +182,7 @@ unsigned long _dl_linux_resolver(struct elf_resolve *tpnt, int reloc_entry)
 }
 
 static __inline__ int
-_dl_do_reloc (struct elf_resolve *tpnt,struct dyn_elf *scope,
+_dl_do_reloc (struct elf_resolve *tpnt,struct r_scope_elem *scope,
 	      ELF_RELOC *rpnt, Elf32_Sym *symtab, char *strtab)
 {
 	int reloc_type;
@@ -215,6 +215,9 @@ _dl_do_reloc (struct elf_resolve *tpnt,struct dyn_elf *scope,
 			&& (ELF32_ST_TYPE(sym_ref.sym->st_info) != STT_TLS
 				&& ELF32_ST_BIND(sym_ref.sym->st_info) != STB_WEAK)))
 			return 1;
+		if (_dl_trace_prelink)
+			_dl_debug_lookup (symname, tpnt, &symtab[symtab_index],
+						&sym_ref, elf_machine_type_class(reloc_type));
 		tls_tpnt = sym_ref.tpnt;
 	} else {
 		symbol_addr = sym_ref.sym->st_value;
@@ -387,9 +390,9 @@ void _dl_parse_lazy_relocation_information(struct dyn_elf *rpnt,
 }
 
 static __inline__ int
-_dl_parse(struct elf_resolve *tpnt, struct dyn_elf *scope,
+_dl_parse(struct elf_resolve *tpnt, struct r_scope_elem *scope,
 	  unsigned long rel_addr, unsigned long rel_size,
-	  int (*reloc_fnc) (struct elf_resolve *tpnt, struct dyn_elf *scope,
+	  int (*reloc_fnc) (struct elf_resolve *tpnt, struct r_scope_elem *scope,
 			    ELF_RELOC *rpnt, Elf32_Sym *symtab, char *strtab))
 {
 	unsigned int i;
@@ -442,7 +445,7 @@ _dl_parse(struct elf_resolve *tpnt, struct dyn_elf *scope,
 }
 
 int _dl_parse_relocation_information(struct dyn_elf *rpnt,
-	unsigned long rel_addr, unsigned long rel_size)
+	struct r_scope_elem *scope, unsigned long rel_addr, unsigned long rel_size)
 {
-	return _dl_parse(rpnt->dyn, rpnt->dyn->symbol_scope, rel_addr, rel_size, _dl_do_reloc);
+	return _dl_parse(rpnt->dyn, scope, rel_addr, rel_size, _dl_do_reloc);
 }

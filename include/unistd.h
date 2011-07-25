@@ -51,9 +51,11 @@ __BEGIN_DECLS
    Software Development Utilities Option.  */
 #define	_POSIX2_SW_DEV	200112L
 
+#if 0 /* uClibc does not provide the utility */
 /* If defined, the implementation supports the
    creation of locales with the localedef utility.  */
 #define _POSIX2_LOCALEDEF       200112L
+#endif
 
 /* X/Open version number to which the library conforms.  It is selectable.  */
 #ifdef __USE_UNIX98
@@ -386,6 +388,13 @@ extern ssize_t pwrite64 (int __fd, __const void *__buf, size_t __n,
    Returns 0 if successful, -1 if not.  */
 extern int pipe (int __pipedes[2]) __THROW __wur;
 libc_hidden_proto(pipe)
+
+#if defined __UCLIBC_LINUX_SPECIFIC__ && defined __USE_GNU
+/* Same as pipe but apply flags passed in FLAGS to the new file
+   descriptors.  */
+extern int pipe2 (int __pipedes[2], int __flags) __THROW __wur;
+libc_hidden_proto(pipe2)
+#endif
 
 /* Schedule an alarm.  In SECONDS seconds, the process will get a SIGALRM.
    If SECONDS is zero, any currently scheduled alarm will be cancelled.

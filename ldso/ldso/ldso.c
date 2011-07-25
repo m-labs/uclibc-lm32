@@ -57,6 +57,12 @@ struct r_debug *_dl_debug_addr = NULL;	/* Used to communicate with the gdb debug
 void *(*_dl_malloc_function) (size_t size) = NULL;
 void (*_dl_free_function) (void *p) = NULL;
 
+#ifdef __LDSO_PRELINK_SUPPORT__
+char *_dl_trace_prelink                      = NULL;	/* Library for prelinking trace */
+struct elf_resolve *_dl_trace_prelink_map    = NULL;	/* Library module for prelinking trace */
+bool _dl_verbose				= true;					/* On by default */
+bool prelinked					= false;
+#endif
 static int _dl_secure = 1; /* Are we dealing with setuid stuff? */
 
 #ifdef __SUPPORT_LD_DEBUG__
@@ -70,8 +76,18 @@ char *_dl_debug_bindings  = NULL;
 int   _dl_debug_file      = 2;
 #endif
 
-/* Needed for standalone execution. */
+#if defined (__LDSO_STANDALONE_SUPPORT__) && defined (__sh__)
+/* Not hidden, needed for standalone execution. */
+/*
+ * FIXME: align dl_start for SH to other archs so that we can keep this symbol
+ *        hidden and we don't need to handle in __uClibc_main
+ */
+
+unsigned long _dl_skip_args = 0;
+#else
 unsigned long attribute_hidden _dl_skip_args = 0;
+#endif
+
 const char *_dl_progname = UCLIBC_LDSO;      /* The name of the executable being run */
 #include "dl-startup.c"
 #include "dl-symbols.c"
@@ -97,20 +113,19 @@ static unsigned char *_dl_malloc_addr = NULL;	/* Lets _dl_malloc use the already
 static unsigned char *_dl_mmap_zero   = NULL;	/* Also used by _dl_malloc */
 
 static struct elf_resolve **init_fini_list;
+static struct elf_resolve **scope_elem_list;
 static unsigned int nlist; /* # items in init_fini_list */
 extern void _start(void);
 
 #ifdef __UCLIBC_HAS_SSP__
 # include <dl-osinfo.h>
-uintptr_t stack_chk_guard;
+static uintptr_t stack_chk_guard;
 # ifndef THREAD_SET_STACK_GUARD
 /* Only exported for architectures that don't store the stack guard canary
  * in local thread area.  */
 uintptr_t __stack_chk_guard attribute_relro;
-#  ifdef __UCLIBC_HAS_SSP_COMPAT__
-strong_alias(__stack_chk_guard,__guard)
-#  endif
-# elif __UCLIBC_HAS_SSP_COMPAT__
+# endif
+# ifdef __UCLIBC_HAS_SSP_COMPAT__
 uintptr_t __guard attribute_relro;
 # endif
 #endif
@@ -274,20 +289,101 @@ static void __attribute__ ((destructor)) __attribute_used__ _dl_fini(void)
 	}
 }
 
-void _dl_get_ready_to_run(struct elf_resolve *tpnt, DL_LOADADDR_TYPE load_addr,
-			  ElfW(auxv_t) auxvt[AT_EGID + 1], char **envp,
-			  char **argv
+#ifdef __LDSO_PRELINK_SUPPORT__
+static void trace_objects(struct elf_resolve *tpnt, char *str_name)
+{
+	if (_dl_strcmp(_dl_trace_prelink, tpnt->libname) == 0)
+		_dl_trace_prelink_map = tpnt;
+	if (tpnt->libtype == elf_executable) {
+/* Main executeble */
+		_dl_dprintf(1, "\t%s => %s (%x, %x)", tpnt->libname, tpnt->libname,
+					tpnt->mapaddr, DL_LOADADDR_BASE(tpnt->loadaddr));
+	} else {
+/* Preloaded, Needed or interpreter */
+		_dl_dprintf(1, "\t%s => %s (%x, %x)", str_name, tpnt->libname,
+					tpnt->mapaddr, DL_LOADADDR_BASE(tpnt->loadaddr));
+	}
+
+	if ((tpnt->libtype != program_interpreter) && (tpnt->l_tls_modid))
+		_dl_dprintf (1, " TLS(%x, %x)\n", tpnt->l_tls_modid,
+					(size_t) tpnt->l_tls_offset);
+	else
+		_dl_dprintf (1, "\n");
+}
+#endif
+
+static struct elf_resolve * add_ldso(struct elf_resolve *tpnt,
+									 DL_LOADADDR_TYPE load_addr,
+									 ElfW(auxv_t) auxvt[AT_EGID + 1],
+									 struct dyn_elf *rpnt)
+{
+		ElfW(Ehdr) *epnt = (ElfW(Ehdr) *) auxvt[AT_BASE].a_un.a_val;
+		ElfW(Phdr) *myppnt = (ElfW(Phdr) *)
+								DL_RELOC_ADDR(load_addr, epnt->e_phoff);
+		int j;
+		struct stat st;
+
+		tpnt = _dl_add_elf_hash_table(tpnt->libname, tpnt->loadaddr,
+					      tpnt->dynamic_info, (unsigned long)tpnt->dynamic_addr,
+					      0);
+
+		tpnt->mapaddr = load_addr;
+		if (_dl_stat(tpnt->libname, &st) >= 0) {
+			tpnt->st_dev = st.st_dev;
+			tpnt->st_ino = st.st_ino;
+		}
+		tpnt->n_phent = epnt->e_phnum;
+		tpnt->ppnt = myppnt;
+		for (j = 0; j < epnt->e_phnum; j++, myppnt++) {
+			if (myppnt->p_type ==  PT_GNU_RELRO) {
+				tpnt->relro_addr = myppnt->p_vaddr;
+				tpnt->relro_size = myppnt->p_memsz;
+				break;
+			}
+		}
+		tpnt->libtype = program_interpreter;
+		if (rpnt) {
+			rpnt->next = _dl_zalloc(sizeof(struct dyn_elf));
+			rpnt->next->prev = rpnt;
+			rpnt = rpnt->next;
+		} else {
+			rpnt = _dl_zalloc(sizeof(struct dyn_elf));
+		}
+		rpnt->dyn = tpnt;
+		tpnt->rtld_flags = RTLD_NOW | RTLD_GLOBAL; /* Must not be LAZY */
+
+	return tpnt;
+}
+
+static ptrdiff_t _dl_build_local_scope (struct elf_resolve **list,
+										struct elf_resolve *map)
+{
+	struct elf_resolve **p = list;
+	struct init_fini_list *q;
+
+	*p++ = map;
+	map->init_flag |= DL_RESERVED;
+	if (map->init_fini)
+		for (q = map->init_fini; q; q = q->next)
+			if (! (q->tpnt->init_flag & DL_RESERVED))
+				p += _dl_build_local_scope (p, q->tpnt);
+	return p - list;
+}
+
+void *_dl_get_ready_to_run(struct elf_resolve *tpnt, DL_LOADADDR_TYPE load_addr,
+			  ElfW(auxv_t) auxvt[AT_EGID + 1], char **envp, char **argv
 			  DL_GET_READY_TO_RUN_EXTRA_PARMS)
 {
 	ElfW(Addr) app_mapaddr = 0;
 	ElfW(Phdr) *ppnt;
 	ElfW(Dyn) *dpnt;
 	char *lpntstr;
-	unsigned int i;
+	unsigned int i, cnt, nscope_elem;
 	int unlazy = 0, trace_loaded_objects = 0;
 	struct dyn_elf *rpnt;
 	struct elf_resolve *tcurr;
 	struct elf_resolve *tpnt1;
+	struct elf_resolve *ldso_tpnt = NULL;
 	struct elf_resolve app_tpnt_tmp;
 	struct elf_resolve *app_tpnt = &app_tpnt_tmp;
 	struct r_debug *debug_addr;
@@ -295,7 +391,9 @@ void _dl_get_ready_to_run(struct elf_resolve *tpnt, DL_LOADADDR_TYPE load_addr,
 	unsigned long *_dl_envp;		/* The environment address */
 	ElfW(Addr) relro_addr = 0;
 	size_t relro_size = 0;
-	struct stat st;
+	struct r_scope_elem *global_scope;
+	struct elf_resolve **local_scope;
+
 #if defined(USE_TLS) && USE_TLS
 	void *tcbp = NULL;
 #endif
@@ -327,10 +425,12 @@ void _dl_get_ready_to_run(struct elf_resolve *tpnt, DL_LOADADDR_TYPE load_addr,
 		_dl_progname = argv[0];
 	}
 
+#ifndef __LDSO_STANDALONE_SUPPORT__
 	if (_start == (void *) auxvt[AT_ENTRY].a_un.a_val) {
-		_dl_dprintf(_dl_debug_file, "Standalone execution is not supported yet\n");
+		_dl_dprintf(_dl_debug_file, "Standalone execution is not enabled\n");
 		_dl_exit(1);
 	}
+#endif
 
 	/* Start to build the tables of the modules that are required for
 	 * this beast to run.  We start with the basic executable, and then
@@ -380,6 +480,99 @@ void _dl_get_ready_to_run(struct elf_resolve *tpnt, DL_LOADADDR_TYPE load_addr,
 #if defined(USE_TLS) && USE_TLS
 	_dl_error_catch_tsd = &_dl_initial_error_catch_tsd;
 	_dl_init_static_tls = &_dl_nothread_init_static_tls;
+#endif
+
+#ifdef __LDSO_STANDALONE_SUPPORT__
+	if (_start == (void *) auxvt[AT_ENTRY].a_un.a_val) {
+		char *ptmp;
+		unsigned int *aux_dat = (unsigned int *) argv;
+		int argc = aux_dat[-1];
+
+		tpnt->libname = argv[0];
+		while (argc > 1)
+			if (! _dl_strcmp (argv[1], "--library-path") && argc > 2) {
+				_dl_library_path = argv[2];
+				_dl_skip_args += 2;
+				argc -= 2;
+				argv += 2;
+			} else
+				break;
+
+	/*
+	 * If we have no further argument the program was called incorrectly.
+	 * Grant the user some education.
+	 */
+
+		if (argc < 2) {
+			_dl_dprintf(1, "\
+Usage: ld.so [OPTION]... EXECUTABLE-FILE [ARGS-FOR-PROGRAM...]\n\
+You have invoked `ld.so', the helper program for shared library executables.\n\
+This program usually lives in the file `/lib/ld.so', and special directives\n\
+in executable files using ELF shared libraries tell the system's program\n\
+loader to load the helper program from this file.  This helper program loads\n\
+the shared libraries needed by the program executable, prepares the program\n\
+to run, and runs it.  You may invoke this helper program directly from the\n\
+command line to load and run an ELF executable file; this is like executing\n\
+that file itself, but always uses this helper program from the file you\n\
+specified, instead of the helper program file specified in the executable\n\
+file you run.  This is mostly of use for maintainers to test new versions\n\
+of this helper program; chances are you did not intend to run this program.\n\
+\n\
+  --library-path PATH   use given PATH instead of content of the environment\n\
+                        variable LD_LIBRARY_PATH\n");
+			_dl_exit(1);
+		}
+
+		++_dl_skip_args;
+		++argv;
+		_dl_progname = argv[0];
+
+		_dl_symbol_tables = rpnt = _dl_zalloc(sizeof(struct dyn_elf));
+		/*
+		 * It needs to load the _dl_progname and to map it
+		 * Usually it is the main application launched by means of the ld.so
+		 * but it could be also a shared object (when ld.so used for tracing)
+		 * We keep the misleading app_tpnt name to avoid variable pollution
+		 */
+		app_tpnt = _dl_load_elf_shared_library(_dl_secure, &rpnt, _dl_progname);
+		if (!app_tpnt) {
+			_dl_dprintf(_dl_debug_file, "can't load '%s'\n", _dl_progname);
+			_dl_exit(16);
+		}
+		/*
+		 * FIXME: it needs to properly handle a PIE executable
+		 * Usually for a main application, loadaddr is computed as difference
+		 * between auxvt entry points and phdr, so if it is not 0, that it is a
+		 * PIE executable. In this case instead we need to set the loadaddr to 0
+		 * because we are actually mapping the ELF for the main application by
+		 * ourselves. So the PIE case must be checked.
+		 */
+
+		app_tpnt->rtld_flags = unlazy | RTLD_GLOBAL;
+
+		/*
+		 * This is used by gdb to locate the chain of shared libraries that are
+		 * currently loaded.
+		 */
+		debug_addr = _dl_zalloc(sizeof(struct r_debug));
+		ppnt = (ElfW(Phdr) *)app_tpnt->ppnt;
+		for (i = 0; i < app_tpnt->n_phent; i++, ppnt++) {
+			if (ppnt->p_type == PT_DYNAMIC) {
+				dpnt = (ElfW(Dyn) *) DL_RELOC_ADDR(app_tpnt->loadaddr, ppnt->p_vaddr);
+				_dl_parse_dynamic_info(dpnt, app_tpnt->dynamic_info, debug_addr, app_tpnt->loadaddr);
+			}
+		}
+
+		/* Store the path where the shared lib loader was found
+		 * for later use
+		 */
+		_dl_ldsopath = _dl_strdup(tpnt->libname);
+		ptmp = _dl_strrchr(_dl_ldsopath, '/');
+		if (ptmp != _dl_ldsopath)
+			*ptmp = '\0';
+
+		_dl_debug_early("Lib Loader: (%x) %s\n", (unsigned) DL_LOADADDR_BASE(tpnt->loadaddr), tpnt->libname);
+	} else {
 #endif
 
 	/* At this point we are now free to examine the user application,
@@ -469,7 +662,6 @@ void _dl_get_ready_to_run(struct elf_resolve *tpnt, DL_LOADADDR_TYPE load_addr,
 			app_tpnt->mapaddr = app_mapaddr;
 			app_tpnt->rtld_flags = unlazy | RTLD_GLOBAL;
 			app_tpnt->usage_count++;
-			app_tpnt->symbol_scope = _dl_symbol_tables;
 			lpnt = (unsigned long *) (app_tpnt->dynamic_info[DT_PLTGOT]);
 #ifdef ALLOW_ZERO_PLTGOT
 			if (lpnt)
@@ -530,12 +722,16 @@ void _dl_get_ready_to_run(struct elf_resolve *tpnt, DL_LOADADDR_TYPE load_addr,
 	 * case the executable is actually an ET_DYN object.
 	 */
 	if (app_tpnt->l_tls_initimage != NULL) {
+		unsigned int tmp = (unsigned int) app_tpnt->l_tls_initimage;
 		app_tpnt->l_tls_initimage =
 			(char *) app_tpnt->l_tls_initimage + app_tpnt->loadaddr;
 		_dl_debug_early("Relocated TLS initial image from %x to %x (size = %x)\n",
-			(unsigned int)app_tpnt->l_tls_initimage,
-			app_tpnt->l_tls_initimage, app_tpnt->l_tls_initimage_size);
+			tmp, app_tpnt->l_tls_initimage, app_tpnt->l_tls_initimage_size);
 	}
+#endif
+
+#ifdef __LDSO_STANDALONE_SUPPORT__
+	} /* ! ldso standalone mode */
 #endif
 
 #ifdef __SUPPORT_LD_DEBUG__
@@ -584,6 +780,16 @@ void _dl_get_ready_to_run(struct elf_resolve *tpnt, DL_LOADADDR_TYPE load_addr,
 			}
 		}
 	}
+#endif
+
+#ifdef __LDSO_PRELINK_SUPPORT__
+{
+	char *ld_warn = _dl_getenv ("LD_WARN", envp);
+
+	if (ld_warn && *ld_warn == '\0')
+		_dl_verbose = false;
+}
+	_dl_trace_prelink = _dl_getenv("LD_TRACE_PRELINKING", envp);
 #endif
 
 	if (_dl_getenv("LD_TRACE_LOADED_OBJECTS", envp) != NULL) {
@@ -639,7 +845,7 @@ void _dl_get_ready_to_run(struct elf_resolve *tpnt, DL_LOADADDR_TYPE load_addr,
 				tpnt1 = _dl_load_shared_library(_dl_secure, &rpnt, NULL, str, trace_loaded_objects);
 				if (!tpnt1) {
 #ifdef __LDSO_LDD_SUPPORT__
-					if (trace_loaded_objects)
+					if (trace_loaded_objects || _dl_trace_prelink)
 						_dl_dprintf(1, "\t%s => not found\n", str);
 					else
 #endif
@@ -653,7 +859,7 @@ void _dl_get_ready_to_run(struct elf_resolve *tpnt, DL_LOADADDR_TYPE load_addr,
 					_dl_debug_early("Loading: (%x) %s\n", DL_LOADADDR_BASE(tpnt1->loadaddr), tpnt1->libname);
 
 #ifdef __LDSO_LDD_SUPPORT__
-					if (trace_loaded_objects &&
+					if (trace_loaded_objects && !_dl_trace_prelink &&
 					    tpnt1->usage_count == 1) {
 						/* This is a real hack to make
 						 * ldd not print the library
@@ -681,6 +887,7 @@ void _dl_get_ready_to_run(struct elf_resolve *tpnt, DL_LOADADDR_TYPE load_addr,
 		char *preload;
 		int fd;
 		char c, *cp, *cp2;
+		struct stat st;
 
 		if (_dl_stat(LDSO_PRELOAD, &st) || st.st_size == 0) {
 			break;
@@ -730,7 +937,7 @@ void _dl_get_ready_to_run(struct elf_resolve *tpnt, DL_LOADADDR_TYPE load_addr,
 			tpnt1 = _dl_load_shared_library(0, &rpnt, NULL, cp2, trace_loaded_objects);
 			if (!tpnt1) {
 # ifdef __LDSO_LDD_SUPPORT__
-				if (trace_loaded_objects)
+				if (trace_loaded_objects || _dl_trace_prelink)
 					_dl_dprintf(1, "\t%s => not found\n", cp2);
 				else
 # endif
@@ -744,7 +951,7 @@ void _dl_get_ready_to_run(struct elf_resolve *tpnt, DL_LOADADDR_TYPE load_addr,
 				_dl_debug_early("Loading: (%x) %s\n", DL_LOADADDR_BASE(tpnt1->loadaddr), tpnt1->libname);
 
 # ifdef __LDSO_LDD_SUPPORT__
-				if (trace_loaded_objects &&
+				if (trace_loaded_objects && !_dl_trace_prelink &&
 				    tpnt1->usage_count == 1) {
 					_dl_dprintf(1, "\t%s => %s (%x)\n",
 						    cp2, tpnt1->libname,
@@ -775,14 +982,21 @@ void _dl_get_ready_to_run(struct elf_resolve *tpnt, DL_LOADADDR_TYPE load_addr,
 
 				lpntstr = (char*) (tcurr->dynamic_info[DT_STRTAB] + this_dpnt->d_un.d_val);
 				name = _dl_get_last_path_component(lpntstr);
-				if (_dl_strcmp(name, UCLIBC_LDSO) == 0)
-					continue;
-
 				_dl_if_debug_dprint("\tfile='%s';  needed by '%s'\n", lpntstr, _dl_progname);
 
-				if (!(tpnt1 = _dl_load_shared_library(0, &rpnt, tcurr, lpntstr, trace_loaded_objects)))	{
+				if (_dl_strcmp(name, UCLIBC_LDSO) == 0) {
+						if (!ldso_tpnt) {
+							/* Insert the ld.so only once */
+							ldso_tpnt = add_ldso(tpnt, load_addr, auxvt, rpnt);
+						}
+						ldso_tpnt->usage_count++;
+						tpnt1 = ldso_tpnt;
+				} else
+					tpnt1 = _dl_load_shared_library(0, &rpnt, tcurr, lpntstr, trace_loaded_objects);
+
+				if (!tpnt1) {
 #ifdef __LDSO_LDD_SUPPORT__
-					if (trace_loaded_objects) {
+					if (trace_loaded_objects || _dl_trace_prelink) {
 						_dl_dprintf(1, "\t%s => not found\n", lpntstr);
 						continue;
 					} else
@@ -803,7 +1017,7 @@ void _dl_get_ready_to_run(struct elf_resolve *tpnt, DL_LOADADDR_TYPE load_addr,
 				_dl_debug_early("Loading: (%x) %s\n", DL_LOADADDR_BASE(tpnt1->loadaddr), tpnt1->libname);
 
 #ifdef __LDSO_LDD_SUPPORT__
-				if (trace_loaded_objects &&
+				if (trace_loaded_objects && !_dl_trace_prelink &&
 				    tpnt1->usage_count == 1) {
 					_dl_dprintf(1, "\t%s => %s (%x)\n",
 						    lpntstr, tpnt1->libname,
@@ -815,12 +1029,18 @@ void _dl_get_ready_to_run(struct elf_resolve *tpnt, DL_LOADADDR_TYPE load_addr,
 	}
 	_dl_unmap_cache();
 
-	--nlist; /* Exclude the application. */
+	/* Keep track of the number of elements in the global scope */
+	nscope_elem = nlist;
+
+	if (_dl_loaded_modules->libtype == elf_executable) {
+		--nlist; /* Exclude the application. */
+		tcurr = _dl_loaded_modules->next;
+	} else
+		tcurr = _dl_loaded_modules;
 	init_fini_list = _dl_malloc(nlist * sizeof(struct elf_resolve *));
 	i = 0;
-	for (tcurr = _dl_loaded_modules->next; tcurr; tcurr = tcurr->next) {
+	for (; tcurr; tcurr = tcurr->next)
 		init_fini_list[i++] = tcurr;
-	}
 
 	/* Sort the INIT/FINI list in dependency order. */
 	for (tcurr = _dl_loaded_modules->next; tcurr; tcurr = tcurr->next) {
@@ -866,41 +1086,13 @@ void _dl_get_ready_to_run(struct elf_resolve *tpnt, DL_LOADADDR_TYPE load_addr,
 	 * functions in the dynamic linker and to relocate the interpreter
 	 * again once all libs are loaded.
 	 */
-	if (tpnt) {
-		ElfW(Ehdr) *epnt = (ElfW(Ehdr) *) auxvt[AT_BASE].a_un.a_val;
-		ElfW(Phdr) *myppnt = (ElfW(Phdr) *) DL_RELOC_ADDR(load_addr, epnt->e_phoff);
-		int j;
-
-		tpnt = _dl_add_elf_hash_table(tpnt->libname, load_addr,
-					      tpnt->dynamic_info,
-					      (unsigned long)tpnt->dynamic_addr,
-					      0);
-
-		if (_dl_stat(tpnt->libname, &st) >= 0) {
-			tpnt->st_dev = st.st_dev;
-			tpnt->st_ino = st.st_ino;
-		}
-		tpnt->n_phent = epnt->e_phnum;
-		tpnt->ppnt = myppnt;
-		for (j = 0; j < epnt->e_phnum; j++, myppnt++) {
-			if (myppnt->p_type ==  PT_GNU_RELRO) {
-				tpnt->relro_addr = myppnt->p_vaddr;
-				tpnt->relro_size = myppnt->p_memsz;
-				break;
-			}
-		}
-		tpnt->libtype = program_interpreter;
+	if (!ldso_tpnt) {
+		tpnt = add_ldso(tpnt, load_addr, auxvt, rpnt);
 		tpnt->usage_count++;
-		tpnt->symbol_scope = _dl_symbol_tables;
-		if (rpnt) {
-			rpnt->next = _dl_zalloc(sizeof(struct dyn_elf));
-			rpnt->next->prev = rpnt;
-			rpnt = rpnt->next;
-		} else {
-			rpnt = _dl_zalloc(sizeof(struct dyn_elf));
-		}
-		rpnt->dyn = tpnt;
-		tpnt->rtld_flags = RTLD_NOW | RTLD_GLOBAL; /* Must not be LAZY */
+		nscope_elem++;
+	} else
+		tpnt = ldso_tpnt;
+
 #ifdef RERELOCATE_LDSO
 		/* Only rerelocate functions for now. */
 		tpnt->init_flag = RELOCS_DONE;
@@ -913,16 +1105,44 @@ void _dl_get_ready_to_run(struct elf_resolve *tpnt, DL_LOADADDR_TYPE load_addr,
 		tpnt->init_flag = RELOCS_DONE | JMP_RELOCS_DONE;
 #endif
 		tpnt = NULL;
+
+	/*
+	 * Allocate the global scope array.
+	 */
+	scope_elem_list = (struct elf_resolve **) _dl_malloc(nscope_elem * sizeof(struct elf_resolve *));
+
+	for (i = 0, tcurr = _dl_loaded_modules; tcurr; tcurr = tcurr->next)
+		scope_elem_list[i++] = tcurr;
+
+	_dl_loaded_modules->symbol_scope.r_list = scope_elem_list;
+	_dl_loaded_modules->symbol_scope.r_nlist = nscope_elem;
+	/*
+	 * The symbol scope of the application, that is the first entry of the
+	 * _dl_loaded_modules list, is just the global scope to be used for the
+	 * symbol lookup.
+	 */
+	global_scope = &_dl_loaded_modules->symbol_scope;
+
+	/* Build the local scope for each loaded modules. */
+	local_scope = _dl_malloc(nscope_elem * sizeof(struct elf_resolve *));
+	i = 1;
+	for (tcurr = _dl_loaded_modules->next; tcurr; tcurr = tcurr->next) {
+		unsigned int k;
+		cnt = _dl_build_local_scope(local_scope, scope_elem_list[i++]);
+		tcurr->symbol_scope.r_list = _dl_malloc(cnt * sizeof(struct elf_resolve *));
+		tcurr->symbol_scope.r_nlist = cnt;
+		_dl_memcpy (tcurr->symbol_scope.r_list, local_scope, cnt * sizeof (struct elf_resolve *));
+		/* Restoring the init_flag.*/
+		for (k = 1; k < nscope_elem; k++)
+			scope_elem_list[k]->init_flag &= ~DL_RESERVED;
 	}
 
+	_dl_free(local_scope);
+
 #ifdef __LDSO_LDD_SUPPORT__
-	/* End of the line for ldd.... */
-	if (trace_loaded_objects) {
-		_dl_dprintf(1, "\t%s => %s (%x)\n",
-			    rpnt->dyn->libname + _dl_strlen(_dl_ldsopath) + 1,
-			    rpnt->dyn->libname, DL_LOADADDR_BASE(rpnt->dyn->loadaddr));
+	/* Exit if LD_TRACE_LOADED_OBJECTS is on. */
+	if (trace_loaded_objects && !_dl_trace_prelink)
 		_dl_exit(0);
-	}
 #endif
 
 #if defined(USE_TLS) && USE_TLS
@@ -944,14 +1164,98 @@ void _dl_get_ready_to_run(struct elf_resolve *tpnt, DL_LOADADDR_TYPE load_addr,
 	stack_chk_guard = _dl_setup_stack_chk_guard ();
 # ifdef THREAD_SET_STACK_GUARD
 	THREAD_SET_STACK_GUARD (stack_chk_guard);
-#  ifdef __UCLIBC_HAS_SSP_COMPAT__
-	__guard = stack_chk_guard;
-#  endif
 # else
 	__stack_chk_guard = stack_chk_guard;
 # endif
+# ifdef __UCLIBC_HAS_SSP_COMPAT__
+	__guard = stack_chk_guard;
+# endif
 #endif
 
+#ifdef __LDSO_PRELINK_SUPPORT__
+	if (_dl_trace_prelink) {
+
+		unsigned int nscope_trace = ldso_tpnt ? nscope_elem : (nscope_elem - 1);
+
+		for (i = 0; i < nscope_trace; i++)
+			trace_objects(scope_elem_list[i],
+				_dl_get_last_path_component(scope_elem_list[i]->libname));
+
+		if (_dl_verbose)
+			/* Warn about undefined symbols. */
+			if (_dl_symbol_tables)
+				if (_dl_fixup(_dl_symbol_tables, global_scope, unlazy))
+					_dl_exit(-1);
+		_dl_exit(0);
+	}
+
+	if (_dl_loaded_modules->dynamic_info[DT_GNU_LIBLIST_IDX]) {
+		ElfW(Lib) *liblist, *liblistend;
+		struct elf_resolve **r_list, **r_listend, *l;
+		const char *strtab = (const char *)_dl_loaded_modules->dynamic_info[DT_STRTAB];
+
+		_dl_assert (_dl_loaded_modules->dynamic_info[DT_GNU_LIBLISTSZ_IDX] != 0);
+		liblist = (ElfW(Lib) *) _dl_loaded_modules->dynamic_info[DT_GNU_LIBLIST_IDX];
+		liblistend = (ElfW(Lib) *)
+		((char *) liblist + _dl_loaded_modules->dynamic_info[DT_GNU_LIBLISTSZ_IDX]);
+		r_list = _dl_loaded_modules->symbol_scope.r_list;
+		r_listend = r_list + nscope_elem;
+
+		for (; r_list < r_listend && liblist < liblistend; r_list++) {
+			l = *r_list;
+
+			if (l == _dl_loaded_modules)
+				continue;
+
+			/* If the library is not mapped where it should, fail.  */
+			if (l->loadaddr)
+				break;
+
+			/* Next, check if checksum matches.  */
+			if (l->dynamic_info[DT_CHECKSUM_IDX] == 0 ||
+				l->dynamic_info[DT_CHECKSUM_IDX] != liblist->l_checksum)
+				break;
+
+			if (l->dynamic_info[DT_GNU_PRELINKED_IDX] == 0 ||
+				(l->dynamic_info[DT_GNU_PRELINKED_IDX] != liblist->l_time_stamp))
+				break;
+
+			if (_dl_strcmp(strtab + liblist->l_name, _dl_get_last_path_component(l->libname)) != 0)
+				break;
+
+			++liblist;
+		}
+
+
+		if (r_list == r_listend && liblist == liblistend)
+			prelinked = true;
+
+	}
+
+	_dl_debug_early ("\nprelink checking: %s\n", prelinked ? "ok" : "failed");
+
+	if (prelinked) {
+		if (_dl_loaded_modules->dynamic_info[DT_GNU_CONFLICT_IDX]) {
+			ELF_RELOC *conflict;
+			unsigned long conflict_size;
+
+			_dl_assert (_dl_loaded_modules->dynamic_info[DT_GNU_CONFLICTSZ_IDX] != 0);
+			conflict = (ELF_RELOC *) _dl_loaded_modules->dynamic_info[DT_GNU_CONFLICT_IDX];
+			conflict_size = _dl_loaded_modules->dynamic_info[DT_GNU_CONFLICTSZ_IDX];
+			_dl_parse_relocation_information(_dl_symbol_tables, global_scope,
+				(unsigned long) conflict, conflict_size);
+		}
+
+		/* Mark all the objects so we know they have been already relocated.  */
+		for (tpnt = _dl_loaded_modules; tpnt; tpnt = tpnt->next) {
+			tpnt->init_flag |= RELOCS_DONE;
+			if (tpnt->relro_size)
+				_dl_protect_relro (tpnt);
+		}
+	} else
+#endif
+
+	{
 
 	_dl_debug_early("Beginning relocation fixups\n");
 
@@ -970,13 +1274,14 @@ void _dl_get_ready_to_run(struct elf_resolve *tpnt, DL_LOADADDR_TYPE load_addr,
 	 * order so that COPY directives work correctly.
 	 */
 	if (_dl_symbol_tables)
-		if (_dl_fixup(_dl_symbol_tables, unlazy))
+		if (_dl_fixup(_dl_symbol_tables, global_scope, unlazy))
 			_dl_exit(-1);
 
 	for (tpnt = _dl_loaded_modules; tpnt; tpnt = tpnt->next) {
 		if (tpnt->relro_size)
 			_dl_protect_relro (tpnt);
 	}
+	} /* not prelinked */
 
 #if defined(USE_TLS) && USE_TLS
 	if (!was_tls_init_tp_called && _dl_tls_max_dtv_idx > 0)
@@ -1007,7 +1312,7 @@ void _dl_get_ready_to_run(struct elf_resolve *tpnt, DL_LOADADDR_TYPE load_addr,
 	 * ld.so.1, so we have to look up each symbol individually.
 	 */
 
-	_dl_envp = (unsigned long *) (intptr_t) _dl_find_hash(__C_SYMBOL_PREFIX__ "__environ", _dl_symbol_tables, NULL, 0, NULL);
+	_dl_envp = (unsigned long *) (intptr_t) _dl_find_hash(__C_SYMBOL_PREFIX__ "__environ", global_scope, NULL, 0, NULL);
 	if (_dl_envp)
 		*_dl_envp = (unsigned long) envp;
 
@@ -1063,27 +1368,34 @@ void _dl_get_ready_to_run(struct elf_resolve *tpnt, DL_LOADADDR_TYPE load_addr,
 
 	/* Find the real malloc function and make ldso functions use that from now on */
 	_dl_malloc_function = (void* (*)(size_t)) (intptr_t) _dl_find_hash(__C_SYMBOL_PREFIX__ "malloc",
-			_dl_symbol_tables, NULL, ELF_RTYPE_CLASS_PLT, NULL);
+			global_scope, NULL, ELF_RTYPE_CLASS_PLT, NULL);
 
 #if defined(USE_TLS) && USE_TLS
 	/* Find the real functions and make ldso functions use them from now on */
 	_dl_calloc_function = (void* (*)(size_t, size_t)) (intptr_t)
-		_dl_find_hash(__C_SYMBOL_PREFIX__ "calloc", _dl_symbol_tables, NULL, ELF_RTYPE_CLASS_PLT, NULL);
+		_dl_find_hash(__C_SYMBOL_PREFIX__ "calloc", global_scope, NULL, ELF_RTYPE_CLASS_PLT, NULL);
 
 	_dl_realloc_function = (void* (*)(void *, size_t)) (intptr_t)
-		_dl_find_hash(__C_SYMBOL_PREFIX__ "realloc", _dl_symbol_tables, NULL, ELF_RTYPE_CLASS_PLT, NULL);
+		_dl_find_hash(__C_SYMBOL_PREFIX__ "realloc", global_scope, NULL, ELF_RTYPE_CLASS_PLT, NULL);
 
 	_dl_free_function = (void (*)(void *)) (intptr_t)
-		_dl_find_hash(__C_SYMBOL_PREFIX__ "free", _dl_symbol_tables, NULL, ELF_RTYPE_CLASS_PLT, NULL);
+		_dl_find_hash(__C_SYMBOL_PREFIX__ "free", global_scope, NULL, ELF_RTYPE_CLASS_PLT, NULL);
 
 	_dl_memalign_function = (void* (*)(size_t, size_t)) (intptr_t)
-		_dl_find_hash(__C_SYMBOL_PREFIX__ "memalign", _dl_symbol_tables, NULL, ELF_RTYPE_CLASS_PLT, NULL);
+		_dl_find_hash(__C_SYMBOL_PREFIX__ "memalign", global_scope, NULL, ELF_RTYPE_CLASS_PLT, NULL);
 
 #endif
 
 	/* Notify the debugger that all objects are now mapped in.  */
 	_dl_debug_addr->r_state = RT_CONSISTENT;
 	_dl_debug_state();
+
+#ifdef __LDSO_STANDALONE_SUPPORT__
+	if (_start == (void *) auxvt[AT_ENTRY].a_un.a_val)
+		return (void *) app_tpnt->l_entry;
+	else
+#endif
+		return (void *) auxvt[AT_ENTRY].a_un.a_val;
 }
 
 #include "dl-hash.c"

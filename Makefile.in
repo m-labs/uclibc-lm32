@@ -161,7 +161,7 @@ headers-y += $(target-headers-sysdep)
 headers: $(top_builddir)include/bits/uClibc_config.h | subdirs
 subdirs: $(addprefix $(top_builddir),$(subdirs))
 pregen-headers: $(top_builddir)include/bits/sysnum.h $(pregen-headers-y)
-pregen: pregen-headers
+pregen: headers pregen-headers
 	$(Q)$(if $(UCLIBC_HAS_LOCALE),$(MAKE) -C extra/locale locale_headers)
 
 $(top_builddir)include/bits/sysnum.h: $(top_srcdir)extra/scripts/gen_bits_syscall_h.sh | $(top_builddir)include/bits
@@ -185,6 +185,7 @@ $(top_builddir)include/bits/sysnum.h: $(top_srcdir)extra/scripts/gen_bits_syscal
 		exit 1; \
 	fi
 
+.PHONY: $(LOCAL_INSTALL_PATH)
 $(LOCAL_INSTALL_PATH):
 	$(Q)$(MAKE) PREFIX=$(shell pwd)/$(LOCAL_INSTALL_PATH) RUNTIME_PREFIX=/ \
 	DEVEL_PREFIX=/usr/ \
@@ -206,8 +207,8 @@ $(top_builddir)extra/scripts/unifdef: $(top_srcdir)extra/scripts/unifdef.c
 # a "y" here means the feature is enabled and so we should *not* rm it.
 # if the option expands to nothing though, we can punt the headers.
 HEADERS_RM- := \
-	internal \
 	dl-osinfo.h \
+	hp-timing.h \
 	_lfs_64.h \
 	bits/uClibc_arch_features.h \
 	bits/kernel_sigaction.h \
@@ -215,14 +216,19 @@ HEADERS_RM- := \
 	bits/kernel_types.h \
 	bits/syscalls.h \
 	bits/syscalls-common.h \
-	bits/uClibc_errno.h \
+	bits/uClibc_fpmax.h \
 	bits/uClibc_uintmaxtostr.h \
+	bits/uClibc_uwchar.h \
+	bits/uClibc_va_copy.h \
 	bits/sigcontextinfo.h \
 	bits/stackinfo.h \
 	tls.h \
 	rpc/des_crypt.h \
 	rpc/key_prot.h \
 	rpc/rpc_des.h
+ifeq ($(UCLIBC_STRICT_HEADERS),y)
+HEADERS_RM- += sgtty.h
+endif
 HEADERS_RM-$(HAVE_SHARED)                    += dlfcn.h bits/dlfcn.h
 HEADERS_RM-$(PTHREADS_DEBUG_SUPPORT)         += thread_db.h
 HEADERS_RM-$(UCLIBC_HAS_BSD_ERR)             += err.h
@@ -232,9 +238,9 @@ HEADERS_RM-$(UCLIBC_HAS_FENV)                += fenv.h bits/fenv.h bits/fenvinli
 HEADERS_RM-$(UCLIBC_HAS_FLOATS)              += complex.h fpu_control.h ieee754.h \
 	math.h \
 	tgmath.h \
-	bits/uClibc_fpmax.h \
 	bits/math*.h
 HEADERS_RM-$(findstring y,$(UCLIBC_HAS_FTW)$(UCLIBC_HAS_NFTW))  += ftw.h
+HEADERS_RM-$(UCLIBC_HAS_FTS)                 += fts.h
 HEADERS_RM-$(UCLIBC_HAS_GETTEXT_AWARENESS)   += libintl.h
 HEADERS_RM-$(UCLIBC_HAS_GLIBC_CUSTOM_PRINTF) += printf.h
 HEADERS_RM-$(UCLIBC_HAS_GLOB)                += glob.h
@@ -276,9 +282,7 @@ HEADERS_RM-$(UCLIBC_LINUX_SPECIFIC)          += sys/fsuid.h sys/inotify.h sys/pe
 HEADERS_RM-$(UCLIBC_SUPPORT_AI_ADDRCONFIG)   += ifaddrs.h
 HEADERS_RM-$(UCLIBC_SV4_DEPRECATED)          += ustat.h sys/ustat.h bits/ustat.h
 HEADERS_RM-$(UCLIBC_SUSV3_LEGACY)            += sys/timeb.h regexp.h
-HEADERS_RM-$(UCLIBC_SUSV4_LEGACY)            += utime.h
-	# BREAKAGE: include/signal.h uses it, this rm broke bbox compile:
-	### ucontext.h
+HEADERS_RM-$(UCLIBC_SUSV4_LEGACY)            += utime.h ucontext.h
 
 ifneq ($(findstring install,$(MAKECMDGOALS)),)
 $(addprefix $(PREFIX)$(DEVEL_PREFIX),include $(MULTILIB_DIR)):
@@ -327,13 +331,14 @@ ifeq ($(HARDWIRED_ABSPATH),y)
 		    -e 's:$(SHARED_LIBNAME):$(RUNTIME_PREFIX)$(MULTILIB_DIR)/$(SHARED_LIBNAME):' \
 		    -e 's:$(UCLIBC_LDSO):$(RUNTIME_PREFIX)$(MULTILIB_DIR)/$(UCLIBC_LDSO):' \
 		    $(top_builddir)lib/libc.so > $(PREFIX)$(DEVEL_PREFIX)$(MULTILIB_DIR)/libc.so; \
+		$(SED) -i -e 's://:/:g' $(PREFIX)$(DEVEL_PREFIX)$(MULTILIB_DIR)/libc.so; \
 	fi
 else
 	-$(INSTALL) -m 755 $(top_builddir)lib/libc.so $(PREFIX)$(DEVEL_PREFIX)$(MULTILIB_DIR)/
 endif
 ifeq ($(UCLIBC_HAS_BACKTRACE),y)
 # Add the AS_NEEDED entry for libubacktrace.so
-	if [ -f $(top_builddir)lib/libc.so -a -f $(PREFIX)$(RUNTIME_PREFIX)$(MULTILIB_DIR)/$(SHARED_MAJORNAME) ] ; then \
+	if [ -f $(top_builddir)lib/libc.so -a -f $(PREFIX)$(RUNTIME_PREFIX)$(MULTILIB_DIR)/$(SHARED_LIBNAME) ] ; then \
 		echo "GROUP ( $(UBACKTRACE_ASNEEDED) )" >> $(PREFIX)$(DEVEL_PREFIX)$(MULTILIB_DIR)/libc.so; \
 	fi
 endif
@@ -345,6 +350,7 @@ ifeq ($(HARDWIRED_ABSPATH),y)
 		cp $(top_srcdir)extra/scripts/format.lds $(PREFIX)$(DEVEL_PREFIX)$(MULTILIB_DIR)/libpthread.so; \
 		echo "GROUP ( $(RUNTIME_PREFIX)$(MULTILIB_DIR)/libpthread.so.$(ABI_VERSION) $(DEVEL_PREFIX)$(MULTILIB_DIR)/libpthread_nonshared.a )" \
 			>> $(PREFIX)$(DEVEL_PREFIX)$(MULTILIB_DIR)/libpthread.so; \
+		$(SED) -i -e 's://:/:g' $(PREFIX)$(DEVEL_PREFIX)$(MULTILIB_DIR)/libpthread.so; \
 	fi
 else
 	-$(INSTALL) -m 755 $(top_builddir)lib/libpthread.so $(PREFIX)$(DEVEL_PREFIX)$(MULTILIB_DIR)/
@@ -442,8 +448,8 @@ allnoconfig: $(top_builddir)extra/config/conf
 	$(Q)$(top_builddir)extra/config/conf -n extra/Configs/Config.in
 
 defconfig: $(top_builddir)extra/config/conf
-	$(Q)$(top_builddir)extra/config/conf -d extra/Configs/Config.in \
-		-D extra/Configs/defconfigs/$(ARCH)
+	$(Q)$(top_builddir)extra/config/conf \
+		-D extra/Configs/defconfigs/$(ARCH) extra/Configs/Config.in
 
 menuconfig-clean-y:
 	$(Q)$(MAKE) -C extra/config CLEAN_extra/config

@@ -55,7 +55,7 @@ extern struct link_map *_dl_update_slotinfo(unsigned long int req_modid);
 
 extern struct elf_resolve * _dl_load_shared_library(int, struct dyn_elf **,
 	struct elf_resolve *, char *, int);
-extern int _dl_fixup(struct dyn_elf *rpnt, int lazy);
+extern int _dl_fixup(struct dyn_elf *rpnt, struct r_scope_elem *scope, int lazy);
 extern void _dl_protect_relro(struct elf_resolve * tpnt);
 extern int _dl_errno;
 extern struct dyn_elf *_dl_symbol_tables;
@@ -271,6 +271,21 @@ void dl_cleanup(void)
 	}
 }
 
+static ptrdiff_t _dl_build_local_scope (struct elf_resolve **list,
+	struct elf_resolve *map)
+{
+	struct elf_resolve **p = list;
+	struct init_fini_list *q;
+
+	*p++ = map;
+	map->init_flag |= DL_RESERVED;
+	if (map->init_fini)
+		for (q = map->init_fini; q; q = q->next)
+			if (! (q->tpnt->init_flag & DL_RESERVED))
+				p += _dl_build_local_scope (p, q->tpnt);
+	return p - list;
+}
+
 void *dlopen(const char *libname, int flag)
 {
 	struct elf_resolve *tpnt, *tfrom;
@@ -283,6 +298,8 @@ void *dlopen(const char *libname, int flag)
 	unsigned int nlist, i;
 	struct elf_resolve **init_fini_list;
 	static bool _dl_init;
+	struct elf_resolve **local_scope;
+	struct r_scope_elem *ls;
 #if defined(USE_TLS) && USE_TLS
 	bool any_tls = false;
 #endif
@@ -458,6 +475,23 @@ void *dlopen(const char *libname, int flag)
 		}
 
 	}
+	/* Build the local scope for the dynamically loaded modules. */
+	local_scope = _dl_malloc(nlist * sizeof(struct elf_resolve *)); /* Could it allocated on stack? */
+	for (i = 0; i < nlist; i++)
+		if (init_fini_list[i]->symbol_scope.r_nlist == 0) {
+			int k, cnt;
+			cnt = _dl_build_local_scope(local_scope, init_fini_list[i]);
+			init_fini_list[i]->symbol_scope.r_list = _dl_malloc(cnt * sizeof(struct elf_resolve *));
+			init_fini_list[i]->symbol_scope.r_nlist = cnt;
+			_dl_memcpy (init_fini_list[i]->symbol_scope.r_list, local_scope,
+					cnt * sizeof (struct elf_resolve *));
+			/* Restoring the init_flag.*/
+			for (k = 0; k < nlist; k++)
+				init_fini_list[k]->init_flag &= ~DL_RESERVED;
+		}
+
+	_dl_free(local_scope);
+
 	/* Sort the INIT/FINI list in dependency order. */
 	for (runp2 = dep_list; runp2; runp2 = runp2->next) {
 		unsigned int j, k;
@@ -505,8 +539,13 @@ void *dlopen(const char *libname, int flag)
 	 */
 	_dl_perform_mips_global_got_relocations(tpnt, !now_flag);
 #endif
+	/* Get the tail of the list */
+	for (ls = &_dl_loaded_modules->symbol_scope; ls && ls->next; ls = ls->next);
 
-	if (_dl_fixup(dyn_chain, now_flag))
+	/* Extend the global scope by adding the local scope of the dlopened DSO. */
+	ls->next = &dyn_chain->dyn->symbol_scope;
+
+	if (_dl_fixup(dyn_chain, &_dl_loaded_modules->symbol_scope, now_flag))
 		goto oops;
 
 	if (relro_ptr) {
@@ -612,7 +651,6 @@ void *dlsym(void *vhandle, const char *name)
 	ElfW(Addr) from;
 	struct dyn_elf *rpnt;
 	void *ret;
-	struct elf_resolve *tls_tpnt = NULL;
 	struct symbol_ref sym_ref = { NULL, NULL };
 	/* Nastiness to support underscore prefixes.  */
 #ifdef __UCLIBC_UNDERSCORES__
@@ -668,12 +706,12 @@ void *dlsym(void *vhandle, const char *name)
 	tpnt = NULL;
 	if (handle == _dl_symbol_tables)
 		tpnt = handle->dyn; /* Only search RTLD_GLOBAL objs if global object */
-	ret = _dl_find_hash(name2, handle, tpnt, 0, &sym_ref);
+	ret = _dl_find_hash(name2, &handle->dyn->symbol_scope, tpnt, ELF_RTYPE_CLASS_DLSYM, &sym_ref);
 
 #if defined(USE_TLS) && USE_TLS && defined SHARED
-	if (sym_ref.tpnt) {
+	if (sym_ref.sym && (ELF_ST_TYPE(sym_ref.sym->st_info) == STT_TLS) && (sym_ref.tpnt)) {
 		/* The found symbol is a thread-local storage variable.
-		Return the address for to the current thread.  */
+		Return its address for the current thread.  */
 		ret = _dl_tls_symaddr ((struct link_map *)sym_ref.tpnt, (Elf32_Addr)ret);
 	}
 #endif
@@ -709,6 +747,7 @@ static int do_dlclose(void *vhandle, int need_fini)
 	struct dyn_elf *handle;
 	unsigned int end;
 	unsigned int i, j;
+	struct r_scope_elem *ls;
 #if defined(USE_TLS) && USE_TLS
 	bool any_tls = false;
 	size_t tls_free_start = NO_TLS_OFFSET;
@@ -874,7 +913,7 @@ static int do_dlclose(void *vhandle, int need_fini)
 			}
 #endif
 
-			DL_LIB_UNMAP (tpnt, end);
+			DL_LIB_UNMAP (tpnt, end - tpnt->mapaddr);
 			/* Free elements in RTLD_LOCAL scope list */
 			for (runp = tpnt->rtld_local; runp; runp = tmp) {
 				tmp = runp->next;
@@ -898,6 +937,16 @@ static int do_dlclose(void *vhandle, int need_fini)
 				}
 			}
 
+			if (handle->dyn == tpnt) {
+				/* Unlink the local scope from global one */
+				for (ls = &_dl_loaded_modules->symbol_scope; ls; ls = ls->next)
+					if (ls->next->r_list[0] == tpnt) {
+						_dl_if_debug_print("removing symbol_scope: %s\n", tpnt->libname);
+						break;
+					}
+				ls->next = ls->next->next;
+			}
+
 			/* Next, remove tpnt from the global symbol table list */
 			if (_dl_symbol_tables) {
 				if (_dl_symbol_tables->dyn == tpnt) {
@@ -919,8 +968,13 @@ static int do_dlclose(void *vhandle, int need_fini)
 				}
 			}
 			free(tpnt->libname);
+			free(tpnt->symbol_scope.r_list);
 			free(tpnt);
 		}
+	}
+	for (rpnt1 = handle->next; rpnt1; rpnt1 = rpnt1_tmp) {
+		rpnt1_tmp = rpnt1->next;
+		free(rpnt1);
 	}
 	free(handle->init_fini.init_fini);
 	free(handle);
@@ -1064,7 +1118,11 @@ int dladdr(const void *__address, Dl_info * __info)
 					ElfW(Addr) symbol_addr;
 
 					symbol_addr = (ElfW(Addr)) DL_RELOC_ADDR(pelf->loadaddr, symtab[si].st_value);
-					if (symbol_addr <= (ElfW(Addr))__address && (!sf || sa < symbol_addr)) {
+					if ((symtab[si].st_shndx != SHN_UNDEF
+						 || symtab[si].st_value != 0)
+						&& ELF_ST_TYPE(symtab[si].st_info) != STT_TLS
+						&& DL_ADDR_SYM_MATCH(symbol_addr, &symtab[si], sa,
+											 (ElfW(Addr)) __address)) {
 						sa = symbol_addr;
 						sn = si;
 						sf = 1;
@@ -1080,7 +1138,11 @@ int dladdr(const void *__address, Dl_info * __info)
 				ElfW(Addr) symbol_addr;
 
 				symbol_addr = (ElfW(Addr)) DL_RELOC_ADDR(pelf->loadaddr, symtab[si].st_value);
-				if (symbol_addr <= (ElfW(Addr))__address && (!sf || sa < symbol_addr)) {
+				if ((symtab[si].st_shndx != SHN_UNDEF
+					 || symtab[si].st_value != 0)
+					&& ELF_ST_TYPE(symtab[si].st_info) != STT_TLS
+					&& DL_ADDR_SYM_MATCH(symbol_addr, &symtab[si], sa,
+										 (ElfW(Addr)) __address)) {
 					sa = symbol_addr;
 					sn = si;
 					sf = 1;

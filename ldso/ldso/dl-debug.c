@@ -104,3 +104,59 @@ static void debug_reloc(ElfW(Sym) *symtab, char *strtab, ELF_RELOC *rpnt)
 #define debug_reloc(symtab, strtab, rpnt)
 
 #endif /* __SUPPORT_LD_DEBUG__ */
+
+#ifdef __LDSO_PRELINK_SUPPORT__
+static void
+internal_function
+_dl_debug_lookup (const char *undef_name, struct elf_resolve *undef_map,
+					const ElfW(Sym) *ref, struct symbol_ref *value, int type_class)
+{
+#ifdef SHARED
+  unsigned long symbol_addr;
+
+  if (_dl_trace_prelink)
+    {
+      int conflict = 0;
+      struct symbol_ref val = { ref, NULL };
+
+      if ((_dl_trace_prelink_map == NULL
+	   || _dl_trace_prelink_map == _dl_loaded_modules)
+	  && undef_map != _dl_loaded_modules)
+	{
+		symbol_addr = (unsigned long)
+					  _dl_find_hash(undef_name, &undef_map->symbol_scope,
+									undef_map, type_class, &val);
+
+	  if (val.sym != value->sym || val.tpnt != value->tpnt)
+	    conflict = 1;
+	}
+
+      if (value->sym
+	  && (__builtin_expect (ELF_ST_TYPE(value->sym->st_info)
+				== STT_TLS, 0)))
+	type_class = 4;
+
+      if (conflict
+	  || _dl_trace_prelink_map == undef_map
+	  || _dl_trace_prelink_map == NULL
+	  || type_class == 4)
+	{
+	  _dl_dprintf (1, "%s %x %x -> %x %x ",
+		      conflict ? "conflict" : "lookup",
+		      (size_t) undef_map->mapaddr,
+		      (size_t) (((ElfW(Addr)) ref) - undef_map->mapaddr),
+		      (size_t) (value->tpnt ? value->tpnt->mapaddr : 0),
+		      (size_t) (value->sym ? value->sym->st_value : 0));
+	  if (conflict)
+	    _dl_dprintf (1, "x %x %x ",
+			(size_t) (val.tpnt ? val.tpnt->mapaddr : 0),
+			(size_t) (val.sym ? val.sym->st_value : 0));
+	  _dl_dprintf (1, "/%x %s\n", type_class, undef_name);
+	}
+}
+#endif
+}
+
+#else
+#define _dl_debug_lookup(undef_name, undef_map, ref, value, type_class)
+#endif

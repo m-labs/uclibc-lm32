@@ -233,12 +233,12 @@ cmd_compile.c = $(CC) -c $< -o $@ $(CFLAGS) \
 	$(CFLAGS-$(notdir $<)) \
 	$(CFLAGS-$(notdir $@)) \
 	$(CFLAGS_gen.dep)
-cmd_compile.i = $(cmd_compile.c:-c=-E -dD $(EXTRA_CPPFLAGS))
+cmd_compile.i = $(cmd_compile.c:-c=-E -dD) $(UCLIBC_EXTRA_CPPFLAGS)
 cmd_compile.s = $(cmd_compile.c:-c=-S)
 cmd_compile.u = $(CC) $^ $(DEPS-$(notdir $@)) -o $@ $(CFLAGS) $(CFLAGS-$(notdir $(^D))) $(CFLAGS-$(notdir $@)) $(CFLAGS_gen.dep)
 cmd_compile.S = $(filter-out -std=gnu99, $(cmd_compile.c)) -D__ASSEMBLER__ $(ASFLAGS) $(ARCH_ASFLAGS) $(ASFLAGS-$(suffix $@)) $(ASFLAGS-$(notdir $<)) $(ASFLAGS-$(notdir $@))
 cmd_compile.m = $(cmd_compile.c) -DL_$(patsubst %$(suffix $(notdir $@)),%,$(notdir $@))
-cmd_compile.mi= $(cmd_compile.m:-c=-E -dD $(EXTRA_CPPFLAGS))
+cmd_compile.mi= $(cmd_compile.m:-c=-E -dD) $(UCLIBC_EXTRA_CPPFLAGS)
 
 cmd_compile-m = $(CC) $^ -c -o $@ $(CFLAGS) $(CFLAGS-$(suffix $@)) $(CFLAGS-$(notdir $(@D))) $(CFLAGS-$(notdir $@)) $(sort $(foreach d,$(^:$(top_srcdir)=),$(collect_multi_flags)))
 cmd_strip     = $(STRIPTOOL) $(STRIP_FLAGS) $^
@@ -294,10 +294,20 @@ endef
 cmd_hcompile.u = $(HOSTCC) $(filter-out $(PHONY),$^) $(DEPS-$(notdir $@)) -o $@ $(BUILD_LDFLAGS) $(BUILD_LDFLAGS-$(notdir $(^D))) $(BUILD_LDFLAGS-$(notdir $@)) $(BUILD_CFLAGS) $(BUILD_CFLAGS-$(notdir $(^D))) $(BUILD_CFLAGS-$(notdir $@))
 cmd_hcompile.o = $(HOSTCC) $(filter-out $(PHONY),$<) $(DEPS-$(notdir $@)) -c -o $@ $(BUILD_CFLAGS) $(BUILD_CFLAGS-$(notdir $(^D))) $(BUILD_CFLAGS-$(notdir $@))
 
+define create-lds
+	$(Q)$(RM) $@.lds
+	$(Q)$(CC) -nostdlib -nostartfiles -shared -Wl,-z,combreloc \
+	-Wl,-z,relro -Wl,--hash-style=gnu -Wl,-z,defs \
+	-Wl,--verbose 2>&1 | LC_ALL=C \
+	sed -e '/^=========/,/^=========/!d;/^=========/d' \
+	-e 's/\. = .* + SIZEOF_HEADERS;/& _begin = . - SIZEOF_HEADERS;/' > $@.lds
+endef
+
 define link.so
 	$(Q)$(RM) $@ $@.$(2) $(dir $@)$(1)
 	@$(disp_ld)
-	$(Q)$(CC) $(LDFLAGS-$(notdir $@)) -Wl,-soname=$(notdir $@).$(2) \
+	$(Q)$(CC) $(LDFLAGS-$(notdir $@)) $(LDFLAGS-y-$(@F)) \
+		-Wl,-soname=$(notdir $@).$(2) \
 		$(NOSTDLIB_CFLAGS) -o $(dir $@)$(1) $(START_FILE-$(notdir $@)) \
 		-Wl,--whole-archive $(firstword $^) -Wl,--no-whole-archive \
 		$(LIBS-$(notdir $@)) $(LIBGCC) $(END_FILE-$(notdir $@))
@@ -363,8 +373,14 @@ $(top_builddir)%.dep:
 $(top_builddir)lib/interp.c: | $(top_builddir)lib
 	$(Q)echo "/* Force shared libraries to know about the correct library loader */" > $@.tmp
 	$(Q)echo "#include <features.h>" >> $@.tmp
+ifeq ($(HARDWIRED_ABSPATH),y)
 	$(Q)echo "const char __dl_ldso__[] attribute_hidden __attribute__ ((weak)) __attribute__ ((section " \
 		"(\".interp\"))) =\""$(RUNTIME_PREFIX)$(MULTILIB_DIR)/$(UCLIBC_LDSO)"\";" >> $@.tmp
+	$(Q)$(SED) -i -e 's://:/:g' $@.tmp
+else
+	$(Q)echo "const char __dl_ldso__[] attribute_hidden __attribute__ ((weak)) __attribute__ ((section " \
+		"(\".interp\"))) =\""$(UCLIBC_LDSO)"\";" >> $@.tmp
+endif
 	$(Q)mv $@.tmp $@
 
 $(interp): $(top_builddir)lib/interp.c | $(sub_headers)

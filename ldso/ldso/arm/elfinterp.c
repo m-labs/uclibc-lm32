@@ -69,7 +69,7 @@ unsigned long _dl_linux_resolver(struct elf_resolve *tpnt, int reloc_entry)
 	got_addr = (char **) instr_addr;
 
 	/* Get the address of the GOT entry */
-	new_addr = _dl_find_hash(symname, tpnt->symbol_scope,
+	new_addr = _dl_find_hash(symname, &_dl_loaded_modules->symbol_scope,
 				 tpnt, ELF_RTYPE_CLASS_PLT, NULL);
 	if (unlikely(!new_addr)) {
 		_dl_dprintf(2, "%s: can't resolve symbol '%s'\n",
@@ -99,9 +99,9 @@ unsigned long _dl_linux_resolver(struct elf_resolve *tpnt, int reloc_entry)
 }
 
 static int
-_dl_parse(struct elf_resolve *tpnt, struct dyn_elf *scope,
+_dl_parse(struct elf_resolve *tpnt, struct r_scope_elem *scope,
 	  unsigned long rel_addr, unsigned long rel_size,
-	  int (*reloc_fnc) (struct elf_resolve *tpnt, struct dyn_elf *scope,
+	  int (*reloc_fnc) (struct elf_resolve *tpnt, struct r_scope_elem *scope,
 			    ELF_RELOC *rpnt, Elf32_Sym *symtab, char *strtab))
 {
 	int i;
@@ -181,14 +181,14 @@ fix_bad_pc24 (unsigned long *const reloc_addr, unsigned long value)
 #endif
 
 static int
-_dl_do_reloc (struct elf_resolve *tpnt,struct dyn_elf *scope,
+_dl_do_reloc (struct elf_resolve *tpnt,struct r_scope_elem *scope,
 	      ELF_RELOC *rpnt, Elf32_Sym *symtab, char *strtab)
 {
 	int reloc_type;
 	int symtab_index;
+	char *symname;
 	unsigned long *reloc_addr;
 	unsigned long symbol_addr;
-	const Elf32_Sym *def = 0;
 	struct symbol_ref sym_ref;
 	struct elf_resolve *def_mod = 0;
 	int goof = 0;
@@ -200,10 +200,11 @@ _dl_do_reloc (struct elf_resolve *tpnt,struct dyn_elf *scope,
 	symbol_addr = 0;
 	sym_ref.sym = &symtab[symtab_index];
 	sym_ref.tpnt = NULL;
+	symname = strtab + symtab[symtab_index].st_name;
 
 	if (symtab_index) {
-		symbol_addr = _dl_find_hash(strtab + symtab[symtab_index].st_name,
-			scope, tpnt, elf_machine_type_class(reloc_type), &sym_ref);
+		symbol_addr = _dl_find_hash(symname, scope, tpnt,
+						elf_machine_type_class(reloc_type), &sym_ref);
 
 		/*
 		 * We want to allow undefined references to weak symbols - this might
@@ -216,6 +217,9 @@ _dl_do_reloc (struct elf_resolve *tpnt,struct dyn_elf *scope,
 			return 1;
 
 		}
+		if (_dl_trace_prelink)
+			_dl_debug_lookup (symname, tpnt, &symtab[symtab_index],
+					&sym_ref, elf_machine_type_class(reloc_type));
 		def_mod = sym_ref.tpnt;
 	} else {
 		/*
@@ -308,7 +312,7 @@ _dl_do_reloc (struct elf_resolve *tpnt,struct dyn_elf *scope,
 }
 
 static int
-_dl_do_lazy_reloc (struct elf_resolve *tpnt, struct dyn_elf *scope,
+_dl_do_lazy_reloc (struct elf_resolve *tpnt, struct r_scope_elem *scope,
 		   ELF_RELOC *rpnt, Elf32_Sym *symtab, char *strtab)
 {
 	int reloc_type;
@@ -347,8 +351,8 @@ void _dl_parse_lazy_relocation_information(struct dyn_elf *rpnt,
 }
 
 int _dl_parse_relocation_information(struct dyn_elf *rpnt,
-	unsigned long rel_addr, unsigned long rel_size)
+	struct r_scope_elem *scope, unsigned long rel_addr, unsigned long rel_size)
 {
-	return _dl_parse(rpnt->dyn, rpnt->dyn->symbol_scope, rel_addr, rel_size, _dl_do_reloc);
+	return _dl_parse(rpnt->dyn, scope, rel_addr, rel_size, _dl_do_reloc);
 }
 

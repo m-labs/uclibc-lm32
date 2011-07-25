@@ -118,6 +118,9 @@ config TARGET_x86_64
 config TARGET_xtensa
 	bool "xtensa"
 
+config TARGET_c6x
+	bool "c6x"
+
 endchoice
 
 
@@ -225,6 +228,10 @@ endif
 
 if TARGET_xtensa
 source "extra/Configs/Config.xtensa"
+endif
+
+if TARGET_c6x
+source "extra/Configs/Config.c6x"
 endif
 
 config TARGET_SUBARCH
@@ -349,6 +356,34 @@ config LDSO_BASE_FILENAME
 
 	  WARNING: Changing the default prefix could cause problems with
 	           binutils' ld !
+
+config LDSO_STANDALONE_SUPPORT
+	bool "Dynamic linker stand-alone mode support"
+	depends on HAVE_SHARED
+	default n
+	help
+	  The dynamic linker can be run either indirectly through running some
+	  dynamically linked program or library (in which case no command line
+	  options to the dynamic linker can be passed and, in the ELF case, the
+	  dynamic linker which is stored in the .interp section of the program
+	  is executed) or directly by running:
+
+	  /lib/ld-uClibc.so.*  [OPTIONS] [PROGRAM [ARGUMENTS]]
+
+	  Stand-alone execution is a prerequisite for adding prelink
+	  capabilities to uClibc dynamic linker, as well useful for testing an
+	  updated version of the dynamic linker without breaking the system.
+
+config LDSO_PRELINK_SUPPORT
+	bool "Dynamic linker prelink support"
+	depends on HAVE_SHARED
+	default n
+	select LDSO_STANDALONE_SUPPORT
+	help
+	  The dynamic linker can be used in stand-alone mode by the prelink tool
+	  for prelinking ELF shared libraries and binaries to speed up startup
+	  time. It also is able to load and handle prelinked libraries and
+	  binaries at runtime.
 
 config UCLIBC_STATIC_LDCONFIG
 	bool "Link ldconfig statically"
@@ -665,6 +700,17 @@ config UCLIBC_SUSV4_LEGACY
 
 	  WARNING! ABI incompatibility.
 
+config UCLIBC_STRICT_HEADERS
+	bool "Enable structures and constants for unsupported features"
+	default n
+	help
+	  Enable structures and constants in headers that should not be used,
+	  because the respective feature is disabled.
+
+	  WARNING! enabling this option requires to patch many faulty apps,
+	  since they make (wrongly) use of these structures/constants,
+	  although the feature was disabled.
+
 config UCLIBC_HAS_STUBS
 	bool "Provide stubs for unavailable functionality"
 	default n
@@ -672,15 +718,6 @@ config UCLIBC_HAS_STUBS
 	  With this option uClibc provides non-functional stubs for
 	  functions which are impossible to implement on the target
 	  architecture. Otherwise, such functions are simply omitted.
-
-	  As of 2008-07, this option makes uClibc provide fork() stub
-	  on NOMMU targets. It always sets errno to ENOSYS and returns -1.
-
-	  This may be useful if you port a lot of software and cannot
-	  audit all of it and replace or disable fork() usage.
-	  With this option, a program which uses fork() will build
-	  successfully. Of course, it may be useless if fork()
-	  is essential for its operation.
 
 config UCLIBC_HAS_SHADOW
 	bool "Shadow Password Support"
@@ -913,8 +950,10 @@ config UCLIBC_LINUX_SPECIFIC
 	bool "Linux specific functions"
 	default y
 	help
+	  accept4(),
 	  capget(), capset(), fstatfs(), inotify_*(), ioperm(), iopl(),
-	  madvise(), modify_ldt(), personality(), prctl()/arch_prctl(),
+	  madvise(), modify_ldt(), pipe2(), personality(),
+	  prctl()/arch_prctl(),
 	  ppoll(), readahead(), reboot(), remap_file_pages(),
 	  sched_getaffinity(), sched_setaffinity(), sendfile(),
 	  setfsgid(), setfsuid(), setresuid(),
@@ -1505,6 +1544,7 @@ config UCLIBC_HAS_GLIBC_CUSTOM_PRINTF
 	help
 	  Answer Y to support glibc's register_printf_function() to allow an
 	  application to add its own printf conversion specifiers.
+	  parse_printf_format() is also enabled.
 
 	  NOTE: Limits the number or registered specifiers to 10.
 	  NOTE: Requires new conversion specifiers to be ASCII
@@ -1896,6 +1936,18 @@ config UCLIBC_HAS_FTW
 	  This interface is rarely used, and adds around 4.5k.  Unless you have
 	  a pressing need for ftw(), you should probably answer N.
 
+config UCLIBC_HAS_FTS
+	bool "Support the fts() interface (bsd-compat)"
+	default n
+	help
+	  The fts functions are provided for traversing UNIX file hierarchies.
+
+	  This interface is currently used by the elfutils and adds
+	  around 7.5k.
+	  You should port your application to use the POSIX nftw()
+	  interface.
+
+	  Unless you need to build/use elfutils, you should prolly answer N.
 
 config UCLIBC_HAS_GLOB
 	bool "Support the glob() interface"
@@ -2320,7 +2372,7 @@ config UCLIBC_MALLOC_DEBUGGING
 
 config UCLIBC_HAS_BACKTRACE
 	bool "Add support for application self-debugging"
-	depends on HAVE_SHARED && TARGET_sh
+	depends on HAVE_SHARED
 	default n
 	help
 	  Answer Y here to compile support for application self-debugging, by adding

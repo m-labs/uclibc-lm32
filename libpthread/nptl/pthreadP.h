@@ -179,7 +179,13 @@ extern struct pthread_key_struct __pthread_keys[PTHREAD_KEYS_MAX];
 hidden_proto (__pthread_keys)
 
 /* Number of threads running.  */
-extern unsigned int __nptl_nthreads attribute_hidden;
+extern unsigned int __nptl_nthreads
+#ifdef SHARED
+	attribute_hidden
+#else
+	__attribute ((weak))
+#endif
+	;
 
 #ifndef __ASSUME_SET_ROBUST_LIST
 /* Negative if we do not have the system call and we can use it.  */
@@ -306,7 +312,7 @@ __do_cancel (void)
 # define LIBC_CANCEL_HANDLED()	/* Nothing.  */
 #endif
 
-/* The signal used for asynchronous cancelation.  */
+/* The signal used for asynchronous cancellation.  */
 #define SIGCANCEL	__SIGRTMIN
 
 
@@ -563,7 +569,13 @@ extern void _pthread_cleanup_push_defer (struct _pthread_cleanup_buffer *buffer,
 extern void _pthread_cleanup_pop_restore (struct _pthread_cleanup_buffer *buffer,
                                           int execute);
 
-extern void __nptl_deallocate_tsd (void) attribute_hidden;
+extern void __nptl_deallocate_tsd (void)
+#ifdef SHARED
+	attribute_hidden
+#else
+	__attribute ((weak))
+#endif
+	;
 
 extern int __nptl_setxid (struct xid_command *cmdp) attribute_hidden;
 

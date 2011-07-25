@@ -27,6 +27,7 @@
 /* Pull in compiler and arch stuff */
 #include <stdlib.h>
 #include <stdarg.h>
+#include <stddef.h> /* for ptrdiff_t */
 #define _FCNTL_H
 #include <bits/fcntl.h>
 #include <bits/wordsize.h>
@@ -34,6 +35,8 @@
 #include <sys/types.h>
 /* Pull in the arch specific page size */
 #include <bits/uClibc_page.h>
+/* Pull in the MIN macro */
+#include <sys/param.h>
 /* Pull in the ldso syscalls and string functions */
 #ifndef __ARCH_HAS_NO_SHARED__
 #include <dl-syscall.h>
@@ -72,6 +75,12 @@ extern char *_dl_preload;              /* Things to be loaded before the libs */
 extern char *_dl_ldsopath;             /* Where the shared lib loader was found */
 extern const char *_dl_progname;       /* The name of the executable being run */
 extern size_t _dl_pagesize;            /* Store the page size for use later */
+#ifdef __LDSO_PRELINK_SUPPORT__
+extern char *_dl_trace_prelink;        /* Library for prelinking trace */
+extern struct elf_resolve *_dl_trace_prelink_map;	/* Library map for prelinking trace */
+#else
+#define _dl_trace_prelink		0
+#endif
 
 #if defined(USE_TLS) && USE_TLS
 extern void _dl_add_to_slotinfo (struct link_map  *l);
@@ -144,7 +153,7 @@ extern void _dl_dprintf(int, const char *, ...);
 # define DL_GET_READY_TO_RUN_EXTRA_ARGS
 #endif
 
-extern void _dl_get_ready_to_run(struct elf_resolve *tpnt, DL_LOADADDR_TYPE load_addr,
+extern void *_dl_get_ready_to_run(struct elf_resolve *tpnt, DL_LOADADDR_TYPE load_addr,
 		ElfW(auxv_t) auxvt[AT_EGID + 1], char **envp, char **argv
 		DL_GET_READY_TO_RUN_EXTRA_PARMS);
 

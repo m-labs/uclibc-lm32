@@ -179,6 +179,14 @@ typedef struct {
 #define DL_LOOKUP_ADDRESS(ADDRESS) (ADDRESS)
 #endif
 
+/* On some architectures dladdr can't use st_size of all symbols this way.  */
+#define DL_ADDR_SYM_MATCH(SYM_ADDR, SYM, MATCHSYM, ADDR)				\
+  ((ADDR) >= (SYM_ADDR)													\
+   && ((((SYM)->st_shndx == SHN_UNDEF || (SYM)->st_size == 0)			\
+        && (ADDR) == (SYM_ADDR))										\
+       || (ADDR) < (SYM_ADDR) + (SYM)->st_size)							\
+   && (!(MATCHSYM) || MATCHSYM < (SYM_ADDR)))
+
 /* Use this macro to convert a pointer to a function's entry point to
  * a pointer to function.  The pointer is assumed to have already been
  * relocated.  LOADADDR is passed because it may contain additional
@@ -212,7 +220,7 @@ typedef struct {
    _dl_find_hash for this reloc TYPE.  TPNT is the module in which the
    matching SYM was found.  */
 #ifndef DL_FIND_HASH_VALUE
-# define DL_FIND_HASH_VALUE(TPNT, TYPE, SYM) (DL_RELOC_ADDR ((SYM)->st_value, (TPNT)->loadaddr))
+# define DL_FIND_HASH_VALUE(TPNT, TYPE, SYM) (DL_RELOC_ADDR ((TPNT)->loadaddr, (SYM)->st_value))
 #endif
 
 /* Unmap all previously-mapped segments accumulated in LOADADDR.
@@ -225,7 +233,7 @@ typedef struct {
 /* Similar to DL_LOADADDR_UNMAP, but used for libraries that have been
    dlopen()ed successfully, when they're dlclose()d.  */
 #ifndef DL_LIB_UNMAP
-# define DL_LIB_UNMAP(LIB, LEN) (DL_LOADADDR_UNMAP ((LIB)->loadaddr, (LEN)))
+# define DL_LIB_UNMAP(LIB, LEN) (DL_LOADADDR_UNMAP ((LIB)->mapaddr, (LEN)))
 #endif
 
 /* Define this to verify that a library named LIBNAME, whose ELF
