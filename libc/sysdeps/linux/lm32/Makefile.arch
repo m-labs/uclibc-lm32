@@ -6,4 +6,4 @@
 #
 
 CSRC := 
-SSRC := clone.S setjmp.S __longjmp.S
+SSRC := clone.S setjmp.S __longjmp.S vfork.S
