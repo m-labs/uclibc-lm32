@@ -7,17 +7,6 @@
 
 #ifndef __ASSEMBLER__
 
-#include <errno.h>
-
-#define __syscall_return(type, res)					\
-	do {								\
-		if (unlikely(INTERNAL_SYSCALL_ERROR_P(res, ))) {	\
-			__set_errno(INTERNAL_SYSCALL_ERRNO(res, ));	\
-			res = (unsigned long) -1;			\
-		}							\
-		return (type) (res);					\
-	} while (0)
-
 #define INTERNAL_SYSCALL_NCS(name, err, nr, args...)                    \
         ({                                                              \
                 register int __ret __asm__("r1");                       \
