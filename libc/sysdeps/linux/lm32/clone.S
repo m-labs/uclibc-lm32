@@ -11,52 +11,42 @@
 .align 4
 
 clone:
-    be      r1, r0, 1f
-    be      r2, r0, 1f
+	be	r1, r0, 2f
+	be	r2, r0, 2f
 
-    #addi    sp, sp, -8
-    #sw      (sp+4), r11
-    #sw      (sp+8), r12
+	mvi	r8, __NR_clone
+	scall
 
-    /* save fn and arg */
-    #mv      r11, r1
-    #mv      r12, r4
-    addi    r2, r2, -12
-    sw      (r2+8), r4
-    sw      (r2+4), r1
+	mvi	r3, -4095
+	bgeu	r1, r3, 1f
 
-    mvi     r8, __NR_clone
-    scall
+	be      r1, r0, __thread_start
 
-    bg      r0, r1, 0f
-
-    be      r1, r0, __thread_start
-
-    #lw      r11, (sp+4)
-    #lw      r12, (sp+8)
-    #addi    sp, sp, 8
-    ret
+	ret
 
 __thread_start:
-    mvi     fp, 0
-    #mv      r1, r11
-    #mv      r2, r12
-    lw      r1, (sp+8)
-    lw      r2, (sp+4)
-    call    r2
+	mvi	fp, 0
+	call	r2
 
-    calli HIDDEN_JUMPTARGET(_exit)
+	calli HIDDEN_JUMPTARGET(_exit)
 
     /* Stop the unstoppable.  */
 9:
-    bi      9b
+	bi      9b
 
+2:
+	mvi     r1, -EINVAL
 1:
-    #mvi     r3, -EINVAL
-0:
-    #calli   __errno_location
-    #sw      (r1+0), r3
-    mvi     r1, -1
-    ret
+	addi	sp, sp, -8
+	sw	(sp+4), ra
+	sw	(sp+8), r1
+	calli   __errno_location
+ 	lw	r2, (sp+8)
+	lw	ra, (sp+4)
+	sub	r2, r0, r2
+	sw      (r1+0), r2
+	mvi     r1, -1
+	addi	sp, sp, 8
+	ret
 
 #endif /* __NR_clone */
