@@ -1,9 +1,9 @@
-#ifndef _ASM_LM32_POSIX_TYPES_H
-#define _ASM_LM32_POSIX_TYPES_H
+#ifndef __ASM_GENERIC_POSIX_TYPES_H
+#define __ASM_GENERIC_POSIX_TYPES_H
 
 typedef unsigned long   __kernel_ino_t;
 typedef unsigned int    __kernel_mode_t;
-typedef unsigned int    __kernel_nlink_t;
+typedef unsigned long   __kernel_nlink_t;
 typedef long            __kernel_off_t;
 typedef int             __kernel_pid_t;
 typedef int             __kernel_ipc_pid_t;
@@ -34,4 +34,4 @@ typedef struct {
         int val[2];
 } __kernel_fsid_t;
 
-#endif /* _ASM_LM32_POSIX_TYPES_H */
+#endif /* __ASM_GENERIC_POSIX_TYPES_H */
