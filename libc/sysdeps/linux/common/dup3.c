@@ -10,9 +10,6 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
-#ifdef __NR_dup3
-
-_syscall4(int, dup3, int, oldfd, int, newfd, int, flags)
-libc_hidden_def(dup3)
-
+#if __NR_dup3
+_syscall3(int, dup3, int, oldfd, int, newfd, int, flags)
 #endif
